@@ -1,23 +1,27 @@
 <script setup>
-import { ref } from 'vue';
-import axios from 'axios';
+import { ref, onMounted } from 'vue';
+import { io } from 'socket.io-client';
 
-const apiUrl = 'http://localhost:3000/api/chat';
+const socket = io("http://localhost:3000");
+
 const mensajeUsuario = ref('');
 const mensajes = ref([]);
 
-async function enviarMensaje() {
+
+onMounted(() => {
+  socket.on("respuesta", (texto) => {
+    mensajes.value.push({ de: 'bot', texto });
+  });
+});
+
+function enviarMensaje() {
   if (mensajeUsuario.value.trim() === '') return;
 
-  // Agregar mensaje del usuario
+
   mensajes.value.push({ de: 'usuario', texto: mensajeUsuario.value });
 
-  try {
-    const respuesta = await axios.post(apiUrl, { mensaje: mensajeUsuario.value });
-    mensajes.value.push({ de: 'bot', texto: respuesta.data.respuesta });
-  } catch (error) {
-    mensajes.value.push({ de: 'bot', texto: 'Error al comunicarse con el servidor.' });
-  }
+
+  socket.emit("mensaje", mensajeUsuario.value);
 
   mensajeUsuario.value = '';
 }
@@ -28,7 +32,11 @@ async function enviarMensaje() {
     <h1>🎬 Chatbot del Cine</h1>
     
     <div class="chat-box">
-      <div v-for="(m, index) in mensajes" :key="index" :class="['mensaje', m.de]">
+      <div 
+        v-for="(m, index) in mensajes" 
+        :key="index" 
+        :class="['mensaje', m.de]"
+      >
         <strong v-if="m.de === 'usuario'">Tú:</strong>
         <strong v-else>Bot:</strong>
         {{ m.texto }}
@@ -36,7 +44,11 @@ async function enviarMensaje() {
     </div>
 
     <div class="input-area">
-      <input v-model="mensajeUsuario" placeholder="Escribe tu mensaje..." @keyup.enter="enviarMensaje" />
+      <input 
+        v-model="mensajeUsuario" 
+        placeholder="Escribe tu mensaje..." 
+        @keyup.enter="enviarMensaje"
+      />
       <button @click="enviarMensaje">Enviar</button>
     </div>
   </div>
@@ -72,17 +84,19 @@ async function enviarMensaje() {
 
 .mensaje.bot {
   text-align: left;
-  color: green;
+ color: green;
 }
 
 .input-area {
   display: flex;
   gap: 10px;
 }
+
 input {
   flex: 1;
   padding: 5px;
 }
+
 button {
   padding: 5px 10px;
   cursor: pointer;

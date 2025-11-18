@@ -1,322 +1,295 @@
-// Importar librerías
+// ===== IMPORTS =====
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2');
-const app = express();
-const puerto = 3000;
+const http = require('http');
+const { Server } = require('socket.io');
 
+const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Conexión a MySQL
-const conexion = mysql.createConnection({
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+  }
+});
+
+// ===== CONEXIÓN A MYSQL =====
+const db = mysql.createConnection({
   host: 'localhost',
   user: 'root',
   password: '',
   database: 'cinebot'
 });
 
-conexion.connect(error => {
-  if (error) {
-    console.log('❌ Error al conectar a la base de datos:', error);
-  } else {
-    console.log('✅ Conectado a la base de datos cinebot');
-  }
+db.connect(err => {
+  if (err) console.log("❌ Error DB:", err);
+  else console.log("✅ Conectado a cinebot");
 });
 
-// ===== FUNCIONES AUXILIARES PARA MEJOR COMPRENSIÓN =====
-
-// Normaliza el texto eliminando acentos y caracteres especiales
+// ===== UTILIDADES =====
 function normalizar(texto) {
-  return texto
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[¿?!¡.,;:]/g, '');
+  return texto.toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[¿?¡!.,;:]/g, "");
 }
 
-// Detecta si el mensaje contiene alguna palabra clave
-function contieneAlguna(mensaje, palabrasClave) {
-  const mensajeNorm = normalizar(mensaje);
-  return palabrasClave.some(palabra => mensajeNorm.includes(normalizar(palabra)));
+function contiene(mensaje, arr) {
+  const msg = normalizar(mensaje);
+  return arr.some(p => msg.includes(normalizar(p)));
 }
 
-// Calcula similitud básica entre dos textos (útil para nombres de películas)
-function similitud(texto1, texto2) {
-  const t1 = normalizar(texto1);
-  const t2 = normalizar(texto2);
-  
-  // Coincidencia exacta
+function similitud(a, b) {
+  const t1 = normalizar(a);
+  const t2 = normalizar(b);
   if (t1 === t2) return 1;
-  
-  // Contiene el texto completo
   if (t1.includes(t2) || t2.includes(t1)) return 0.8;
-  
-  // Coincidencia de palabras
-  const palabras1 = t1.split(' ');
-  const palabras2 = t2.split(' ');
-  const coincidencias = palabras1.filter(p => palabras2.includes(p)).length;
-  
-  return coincidencias / Math.max(palabras1.length, palabras2.length);
+
+  const w1 = t1.split(" ");
+  const w2 = t2.split(" ");
+  const comunes = w1.filter(w => w2.includes(w)).length;
+  return comunes / Math.max(w1.length, w2.length);
 }
 
-// Identifica la intención del usuario
-function identificarIntencion(mensaje) {
-  const saludos = ['hola', 'buenas', 'buenos dias', 'buenas tardes', 'buenas noches', 'hey', 'saludos', 'que tal'];
-  const peliculas = ['pelicula', 'peliculas', 'cartelera', 'que hay', 'que tienen', 'que estrenan', 'funciones', 'que puedo ver'];
-  const horarios = ['hora', 'horario', 'cuando', 'que hora', 'a que hora', 'funciones'];
-  const precios = ['precio', 'precios', 'costo', 'costos', 'cuanto', 'vale', 'valor', 'entrada', 'entradas', 'boleto', 'boletos'];
-  const reservar = ['reservar', 'reserva', 'comprar', 'apartar', 'agendar', 'quiero ver', 'me gustaria ver'];
-  const despedidas = ['gracias', 'muchas gracias', 'adios', 'chau', 'bye', 'hasta luego', 'nos vemos', 'me despido'];
+function intencion(mensaje) {
+  const grupos = {
+    saludo: ["hola", "buenas", "hey", "holo", "saludos", "buen"],
+    despedida: ["chau", "adios", "bye", "nos vemos", "gracias"],
+    peliculas: ["pelicula", "peliculas", "cartelera", "pelis"],
+    horarios: ["horario", "hora", "cuando"],
+    precios: ["precio", "cuanto vale", "entrada"],
+    reservar: ["reservar", "comprar", "apartado", "guardar"],
+    agregar: ["agregar", "insertar", "nueva", "poner"],
+  };
 
-  if (contieneAlguna(mensaje, saludos)) return 'saludo';
-  if (contieneAlguna(mensaje, despedidas)) return 'despedida';
-  if (contieneAlguna(mensaje, reservar)) return 'reservar';
-  if (contieneAlguna(mensaje, precios)) return 'precios';
-  if (contieneAlguna(mensaje, horarios)) return 'horarios';
-  if (contieneAlguna(mensaje, peliculas)) return 'peliculas';
-
-  return 'desconocido';
+  for (const [key, palabras] of Object.entries(grupos)) {
+    if (contiene(mensaje, palabras)) return key;
+  }
+  return "desconocido";
 }
 
-// ===== RUTA PRINCIPAL DEL CHATBOT =====
-app.post('/api/chat', (req, res) => {
-  const mensaje = req.body.mensaje;
-  
-  // 🧾 GUARDAR RESERVA - Verificar PRIMERO antes de identificar intención
-  // Formato: nombre, correo, id_funcion, cantidad
-  if (mensaje.includes('@') && mensaje.includes(',')) {
-    const partes = mensaje.split(',').map(p => p.trim());
-    
-    // Si tiene 4 partes, es una reserva
-    if (partes.length === 4) {
-      const nombre = partes[0];
-      const correo = partes[1];
-      const idFuncion = parseInt(partes[2]);
-      const cantidad = parseInt(partes[3]);
+let admin = { autenticado: false, paso: null };
 
-      // Validar que parece una reserva (tiene números en posiciones 3 y 4)
-      if (!isNaN(idFuncion) && !isNaN(cantidad)) {
-        // Validar datos
-        if (!correo.includes('@')) {
-          return res.json({ respuesta: '⚠️ El correo no es válido.' });
-        }
+// ===== SOCKET.IO =====
+io.on("connection", socket => {
+  console.log("🟢 Cliente conectado");
 
-        if (cantidad < 1) {
-          return res.json({ respuesta: '⚠️ La cantidad debe ser al menos 1.' });
-        }
+  socket.on("mensaje", mensaje => {
 
-        // Obtener precio de la función
-        conexion.query(
-          'SELECT p.titulo, f.horario, f.precio FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula WHERE f.id = ?',
-          [idFuncion],
-          (error, resultado) => {
-            if (error || resultado.length === 0) {
-              return res.json({ respuesta: '❌ No se encontró la función especificada. Use "reservar" para ver funciones disponibles.' });
-            }
+    const intent = intencion(mensaje);
 
-            const funcion = resultado[0];
-            const total = funcion.precio * cantidad;
-
-            // Guardar reserva
-            const sql = 'INSERT INTO reservas (nombre, correo, id_funcion, cantidad, total) VALUES (?, ?, ?, ?, ?)';
-            conexion.query(sql, [nombre, correo, idFuncion, cantidad, total], (error, result) => {
-              if (error) {
-                console.error('Error al guardar la reserva:', error);
-                return res.json({ respuesta: '❌ Hubo un error al guardar su reserva. Intente más tarde.' });
-              }
-
-              res.json({
-                respuesta: `✅ 🎫 Reserva confirmada!\n\n👤 Nombre: ${nombre}\n📧 Correo: ${correo}\n🎬 Película: ${funcion.titulo}\n🕓 Horario: ${funcion.horario}\n🎟️ Entradas: ${cantidad}\n💰 Total: ${total}\n\nLe enviaremos los detalles a su correo.`
-              });
-            });
-          }
-        );
-        return; // Importante: salir aquí para no continuar procesando
-      }
+    // ---------------- SALUDO ----------------
+    if (intent === "saludo") {
+      socket.emit("respuesta", "👋 ¡Hola! soy Cinebot, el asistente virtual del cine, estoy para ayudarte puedes preguntarme por películas, horarios, precios o para reservar.");
+      return;
     }
-  }
 
-  // Ahora sí identificar la intención para otros casos
-  const intencion = identificarIntencion(mensaje);
+    if (intent === "despedida") {
+      socket.emit("respuesta", "👋 ¡Gracias por tu visita!");
+      return;
+    }
 
-  // 👋 SALUDO
-  if (intencion === 'saludo') {
-    return res.json({
-      respuesta: '👋 ¡Hola! Soy el asistente virtual del cine 😊. Estoy aquí para ayudarle. Puede preguntar por "películas", "horarios", "precios" o hacer una "reserva".'
-    });
-  }
+    // ---------------- PELÍCULAS ----------------
+    if (intent === "peliculas") {
+      db.query("SELECT titulo FROM peliculas", (err, rows) => {
+        if (err) return socket.emit("respuesta", "❌ Error al obtener películas.");
+        if (rows.length === 0) return socket.emit("respuesta", "No hay películas cargadas.");
 
-  // 👋 DESPEDIDA
-  else if (intencion === 'despedida') {
-    return res.json({
-      respuesta: '👋 ¡Gracias por su visita! Que disfrute su película. ¡Nos vemos pronto! 🎬'
-    });
-  }
-
-  // 🎬 MOSTRAR PELÍCULAS
-  else if (intencion === 'peliculas') {
-    conexion.query('SELECT titulo FROM peliculas', (error, resultados) => {
-      if (error) return res.json({ respuesta: '❌ Error al obtener películas.' });
-      const lista = resultados.map(p => p.titulo).join(', ');
-      res.json({ respuesta: '🎥 Hoy tenemos en cartelera: ' + lista });
-    });
-  }
-
-  // 🕓 MOSTRAR HORARIOS
-  else if (intencion === 'horarios') {
-    conexion.query(
-      'SELECT p.titulo, f.horario FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula',
-      (error, resultados) => {
-        if (error) return res.json({ respuesta: '❌ Error al obtener horarios.' });
-
-        let texto = '🕓 Horarios disponibles:\n';
-        resultados.forEach(r => {
-          texto += `${r.titulo} - ${r.horario}\n`;
-        });
-        res.json({ respuesta: texto });
-      }
-    );
-  }
-
-  // 💰 MOSTRAR PRECIOS
-  else if (intencion === 'precios') {
-    conexion.query(
-      'SELECT p.titulo, f.precio FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula',
-      (error, resultados) => {
-        if (error) return res.json({ respuesta: '❌ Error al obtener precios.' });
-
-        let texto = '💰 Precios:\n';
-        resultados.forEach(r => {
-          texto += `${r.titulo}: $${r.precio}\n`;
-        });
-        res.json({ respuesta: texto });
-      }
-    );
-  }
-
-  // 🎟️ INICIAR PROCESO DE RESERVA
-  else if (intencion === 'reservar') {
-    // Mostrar películas disponibles con sus funciones
-    conexion.query(
-      'SELECT f.id, p.titulo, f.horario, f.precio FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula ORDER BY p.titulo',
-      (error, funciones) => {
-        if (error) return res.json({ respuesta: '❌ Error al obtener funciones disponibles.' });
-
-        let texto = '🎟️ Para reservar, escriba:\nnombre, correo, ID de función, cantidad\n\n📋 Funciones disponibles:\n\n';
-        funciones.forEach(f => {
-          texto += `ID: ${f.id} - ${f.titulo} (${f.horario}) - ${f.precio} c/u\n`;
-        });
-        texto += '\n📝 Ejemplo: Juan Pérez, juan@gmail.com, 1, 2';
-        
-        res.json({ respuesta: texto });
-      }
-    );
-  }
-
-  // 🧾 GUARDAR RESERVA (formato: nombre, correo, id_funcion, cantidad)
-  else if (mensaje.includes('@') && mensaje.includes(',')) {
-    const partes = mensaje.split(',').map(p => p.trim());
-    
-    if (partes.length < 4) {
-      return res.json({
-        respuesta: '⚠️ Formato incompleto. Use:\nnombre, correo, ID función, cantidad\n\nEjemplo: Juan Pérez, juan@gmail.com, 1, 2'
+        const lista = rows.map(r => r.titulo).join(", ");
+        socket.emit("respuesta", "🎥 En cartelera: " + lista);
       });
+      return;
     }
 
-    const nombre = partes[0];
-    const correo = partes[1];
-    const idFuncion = parseInt(partes[2]);
-    const cantidad = parseInt(partes[3]);
+    // ---------------- HORARIOS ----------------
+    if (intent === "horarios") {
+      db.query(
+        "SELECT p.titulo, f.horario FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula",
+        (err, rows) => {
+          if (err) return socket.emit("respuesta", "❌ Error al obtener horarios.");
+          if (rows.length === 0) return socket.emit("respuesta", "No hay funciones disponibles.");
 
-    // Validar datos
-    if (!correo.includes('@')) {
-      return res.json({ respuesta: '⚠️ El correo no es válido.' });
-    }
-
-    if (isNaN(idFuncion) || isNaN(cantidad) || cantidad < 1) {
-      return res.json({ respuesta: '⚠️ El ID de función y cantidad deben ser números válidos.' });
-    }
-
-    // Obtener precio de la función
-    conexion.query(
-      'SELECT p.titulo, f.horario, f.precio FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula WHERE f.id = ?',
-      [idFuncion],
-      (error, resultado) => {
-        if (error || resultado.length === 0) {
-          return res.json({ respuesta: '❌ No se encontró la función especificada. Use "reservar" para ver funciones disponibles.' });
+          const texto = rows.map(r => `${r.titulo} - ${r.horario}`).join("\n");
+          socket.emit("respuesta", "🕓 Horarios:\n" + texto);
         }
+      );
+      return;
+    }
 
-        const funcion = resultado[0];
-        const total = funcion.precio * cantidad;
+    // ---------------- PRECIOS ----------------
+    if (intent === "precios") {
+      db.query(
+        "SELECT p.titulo, f.precio FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula",
+        (err, rows) => {
+          if (err) return socket.emit("respuesta", "❌ Error al obtener precios.");
+          if (rows.length === 0) return socket.emit("respuesta", "No hay precios cargados.");
 
-        // Guardar reserva
-        const sql = 'INSERT INTO reservas (nombre, correo, id_funcion, cantidad, total) VALUES (?, ?, ?, ?, ?)';
-        conexion.query(sql, [nombre, correo, idFuncion, cantidad, total], (error, result) => {
-          if (error) {
-            console.error('Error al guardar la reserva:', error);
-            return res.json({ respuesta: '❌ Hubo un error al guardar su reserva. Intente más tarde.' });
-          }
-
-          res.json({
-            respuesta: `✅ 🎫 Reserva confirmada!\n\n👤 Nombre: ${nombre}\n📧 Correo: ${correo}\n🎬 Película: ${funcion.titulo}\n🕓 Horario: ${funcion.horario}\n🎟️ Entradas: ${cantidad}\n💰 Total: ${total}\n\nLe enviaremos los detalles a su correo.`
-          });
-        });
-      }
-    );
-  }
-
-  // ❓ CASO NO RECONOCIDO - Intentar buscar película similar
-  else {
-    // Buscar si mencionan alguna película en su mensaje
-    conexion.query('SELECT titulo FROM peliculas', (error, peliculas) => {
-      if (error) {
-        return res.json({
-          respuesta: '🤔 Perdón, no entendí la pregunta. Puede preguntar por "películas", "horarios", "precios" o "reservar".'
-        });
-      }
-
-      // Buscar película más similar mencionada
-      let mejorCoincidencia = null;
-      let mejorSimilitud = 0;
-
-      peliculas.forEach(p => {
-        const sim = similitud(mensaje, p.titulo);
-        if (sim > mejorSimilitud && sim > 0.4) {
-          mejorSimilitud = sim;
-          mejorCoincidencia = p.titulo;
+          const texto = rows.map(r => `${r.titulo}: $${r.precio}`).join("\n");
+          socket.emit("respuesta", "💰 Precios:\n" + texto);
         }
+      );
+      return;
+    }
+
+    // ---------------- RESERVAR ----------------
+    if (intent === "reservar") {
+  db.query(
+    "SELECT f.id, p.titulo, f.horario, f.precio FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula",
+    (err, rows) => {
+      if (err) return socket.emit("respuesta", "❌ Error al obtener funciones.");
+
+      let txt = 
+`🎟️ *Para reservar escribí los datos así:*
+
+nombre, correo, ID función, cantidad
+
+📌 *Ejemplo:*  
+Fer Trucolo, fer@gmail.com, 4, 2
+
+📽️ *Funciones disponibles:*  
+`;
+
+      rows.forEach(f => {
+        txt += `\n• ID ${f.id} — ${f.titulo} (${f.horario}) — $${f.precio}`;
       });
 
-      // Si encontró una película, dar info sobre ella
-      if (mejorCoincidencia) {
-        conexion.query(
-          'SELECT p.titulo, f.horario, f.precio FROM peliculas p JOIN funciones f ON p.id = f.id_pelicula WHERE p.titulo = ?',
-          [mejorCoincidencia],
-          (error, datos) => {
-            if (error || datos.length === 0) {
-              return res.json({
-                respuesta: `🎬 Encontré la película "${mejorCoincidencia}". ¿Qué desea saber: horarios, precios o reservar?`
-              });
-            }
+      socket.emit("respuesta", txt);
+    }
+  );
+  return;
+}
 
-            const info = datos[0];
-            res.json({
-              respuesta: `🎬 "${info.titulo}"\n🕓 Horario: ${info.horario}\n💰 Precio: ${info.precio}\n\n¿Desea reservar?`
-            });
-          }
-        );
+    // ---------------- PROCESAR RESERVA ----------------
+    if (mensaje.includes("@") && mensaje.includes(",")) {
+      const partes = mensaje.split(",").map(x => x.trim());
+      if (partes.length < 4) {
+        socket.emit("respuesta", "⚠️ Formato: nombre, correo, ID función, cantidad");
+        return;
+      }
+
+      const [nombre, correo, idFuncion, cantidad] = partes;
+
+      db.query(
+        "SELECT p.titulo, f.horario, f.precio FROM peliculas p JOIN funciones f ON p.id=f.id_pelicula WHERE f.id=?",
+        [idFuncion],
+        (err, rows) => {
+          if (err || rows.length === 0)
+            return socket.emit("respuesta", "❌ No se encontró esa función.");
+
+          const f = rows[0];
+          const total = f.precio * cantidad;
+
+          db.query(
+            "INSERT INTO reservas (nombre, correo, id_funcion, cantidad, total) VALUES (?, ?, ?, ?, ?)",
+            [nombre, correo, idFuncion, cantidad, total]
+          );
+
+          socket.emit("respuesta",
+            `✅ Reserva confirmada!\n🎬 ${f.titulo}\n🕓 ${f.horario}\n🎟️ ${cantidad} entradas\n💰 Total: $${total}`
+          );
+        }
+      );
+      return;
+    }
+
+    // ---------------- ADMIN ----------------
+    if (intent === "agregar") {
+      admin = { autenticado: false, paso: "pedir_pass" };
+      socket.emit("respuesta", "🔐 Ingrese la contraseña:");
+      return;
+    }
+
+    if (admin.paso === "pedir_pass") {
+      if (mensaje === "admin123") {
+        admin = { autenticado: true, paso: "pedir_pelicula" };
+        socket.emit("respuesta", "Ingrese: título, duración, descripción");
       } else {
-        // No entendió nada
-        res.json({
-          respuesta: '🤔 Perdón, no entendí la pregunta. Puede preguntar por "películas", "horarios", "precios" o "reservar".'
-        });
+        socket.emit("respuesta", "❌ Contraseña incorrecta.");
       }
+      return;
+    }
+
+    if (admin.paso === "pedir_pelicula") {
+      const partes = mensaje.split(",").map(p => p.trim());
+      if (partes.length < 3)
+        return socket.emit("respuesta", "Formato: título, duración, descripción");
+
+      const [titulo, duracion, descripcion] = partes;
+
+      db.query(
+        "INSERT INTO peliculas (titulo, duracion, descripcion) VALUES (?, ?, ?)",
+        [titulo, duracion, descripcion],
+        err => {
+          if (err) return socket.emit("respuesta", "❌ Error al guardar película.");
+
+          admin = { autenticado: true, paso: "pedir_funcion" };
+          socket.emit("respuesta", "Película agregada. Ahora ingrese: id_pelicula, horario, sala, precio");
+        }
+      );
+      return;
+    }
+
+    if (admin.paso === "pedir_funcion") {
+      const partes = mensaje.split(",").map(p => p.trim());
+      if (partes.length < 4)
+        return socket.emit("respuesta", "Formato: id_pelicula, horario, sala, precio");
+
+      const [id, horario, sala, precio] = partes;
+
+      db.query(
+        "INSERT INTO funciones (id_pelicula, horario, sala, precio) VALUES (?, ?, ?, ?)",
+        [id, horario, sala, precio],
+        err => {
+          if (err) return socket.emit("respuesta", "❌ Error al agregar función.");
+
+          admin = { autenticado: false, paso: null };
+          socket.emit("respuesta", "✅ Función agregada correctamente.");
+        }
+      );
+      return;
+    }
+
+    // ---------------- NO ENTENDIDO / SIMILITUD ----------------
+    db.query("SELECT titulo FROM peliculas", (err, rows) => {
+      if (err) return socket.emit("respuesta", "No entendí. Preguntá por películas o reservas.");
+
+      let mejor = null;
+      let max = 0;
+
+      rows.forEach(r => {
+        const s = similitud(mensaje, r.titulo);
+        if (s > max && s > 0.4) {
+          mejor = r.titulo;
+          max = s;
+        }
+      });
+
+      if (!mejor) {
+        socket.emit("respuesta", "🤔 No entendí. Podés preguntar por 'películas', 'horarios', 'precios' o 'reservar'.");
+        return;
+      }
+
+      db.query(
+        "SELECT p.titulo, f.horario, f.precio FROM peliculas p JOIN funciones f ON p.id=f.id_pelicula WHERE p.titulo=?",
+        [mejor],
+        (er2, info) => {
+          if (er2 || info.length === 0)
+            return socket.emit("respuesta", `🎬 ${mejor}. ¿Querés ver horarios o reservar?`);
+
+          const d = info[0];
+          socket.emit("respuesta",
+            `🎬 ${d.titulo}\n🕓 ${d.horario}\n💰 $${d.precio}\n¿Querés reservar?`
+          );
+        }
+      );
     });
-  }
+
+  });
 });
 
-// Iniciar servidor
-app.listen(puerto, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${puerto}`);
+server.listen(3000, () => {
+  console.log("🚀 Servidor Socket.IO en http://localhost:3000/");
 });
